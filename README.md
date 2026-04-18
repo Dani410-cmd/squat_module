@@ -7,6 +7,7 @@
 ---
 
 ## 🎮 Как это работает
+Результат можно посмотреть здесь - https://drive.google.com/file/d/11F5fje7sZXq_WQlhkahHjgNWiLujks-F/view?usp=sharing
 
 1. Камера захватывает изображение с помощью OpenCV  
 2. MediaPipe определяет положение тела (pose detection)  
