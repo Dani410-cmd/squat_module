@@ -10,9 +10,10 @@ WIDTH = 500
 HEIGHT = 700
 BIRD_X = 120
 BIRD_SIZE = 40
-SMOOTHING = 0.15
-CALIBRATION_SAMPLES = 90
-COUNTDOWN_SECONDS = 4
+
+SMOOTHING = 0.5
+CALIBRATION_SAMPLES = 30
+COUNTDOWN_SECONDS = 3
 FPS = 60
 
 
@@ -28,9 +29,9 @@ def draw_center_text(frame, text_lines, color=(0, 255, 0)):
     frame[:] = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 1.8
-    thickness = 4
-    line_gap = 24
+    scale = 1.6
+    thickness = 3
+    line_gap = 20
 
     sizes = [cv2.getTextSize(line, font, scale, thickness)[0] for line in text_lines]
     total_h = sum(s[1] for s in sizes) + line_gap * (len(text_lines) - 1)
@@ -68,29 +69,10 @@ def countdown(detector, seconds, message):
     return True
 
 
-def calibrate_position(detector, samples, message):
-    values = []
+def show_status(detector, message, color, duration=2):
+    start = time.time()
 
-    while len(values) < samples:
-        frame, _, hip_y = detector.read_frame()
-        if frame is None:
-            continue
-
-        if hip_y is not None:
-            values.append(hip_y)
-
-        draw_center_text(frame, [message, f"{len(values)} / {samples}"])
-        cv2.imshow("Camera", frame)
-
-        if cv2.waitKey(1) & 0xFF in [27, ord("q")]:
-            return None
-
-    return sum(values) / len(values) if values else None
-
-
-def show_status(detector, message, color, duration_seconds=2):
-    start_time = time.time()
-    while time.time() - start_time < duration_seconds:
+    while time.time() - start < duration:
         frame, _, _ = detector.read_frame()
         if frame is None:
             continue
@@ -111,12 +93,14 @@ def main():
     pygame.display.set_caption("Squat Controlled Bird")
     clock = pygame.time.Clock()
 
+    detector = None
+
     try:
         detector = SquatControlModule()
-    except RuntimeError as error:
-        print(error)
+    except RuntimeError as e:
+        print(e)
         pygame.quit()
-        sys.exit(1)
+        sys.exit()
 
     smoothed_ratio = 0.0
 
@@ -124,26 +108,20 @@ def main():
         if not countdown(detector, COUNTDOWN_SECONDS, "STAND STRAIGHT"):
             return
 
-        detector.standing_hip_y = calibrate_position(
-            detector, CALIBRATION_SAMPLES, "CALIBRATING STAND"
-        )
-        if detector.standing_hip_y is None:
+        if not detector.calibrate_standing(CALIBRATION_SAMPLES):
             return
 
-        if not countdown(detector, COUNTDOWN_SECONDS, "GO TO LOWEST SQUAT"):
+        if not countdown(detector, COUNTDOWN_SECONDS, "GO DOWN"):
             return
 
-        detector.squat_hip_y = calibrate_position(
-            detector, CALIBRATION_SAMPLES, "CALIBRATING SQUAT"
-        )
-        if detector.squat_hip_y is None:
+        if not detector.calibrate_squat(CALIBRATION_SAMPLES):
             return
 
         if not detector.is_calibrated():
-            show_status(detector, "CALIBRATION FAILED", (0, 0, 255), 2)
+            show_status(detector, "CALIBRATION FAILED", (0, 0, 255))
             return
 
-        if not show_status(detector, "CALIBRATION DONE", (0, 255, 0), 2):
+        if not show_status(detector, "READY", (0, 255, 0)):
             return
 
         running = True
@@ -154,60 +132,33 @@ def main():
                 if event.type == pygame.QUIT:
                     running = False
 
-            camera_frame, ratio = detector.get_ratio()
+            frame, ratio = detector.get_ratio()
 
-            screen.fill((135, 206, 235))
-
-            target_ratio = 0.0 if ratio is None else ratio
+            target_ratio = smoothed_ratio if ratio is None else ratio
             smoothed_ratio = (1 - SMOOTHING) * smoothed_ratio + SMOOTHING * target_ratio
 
             max_y = HEIGHT - BIRD_SIZE
             bird_y = smoothed_ratio * max_y
 
+            screen.fill((135, 206, 235))
+
             pygame.draw.rect(
-                screen, (255, 255, 0), (BIRD_X, bird_y, BIRD_SIZE, BIRD_SIZE)
+                screen,
+                (255, 255, 0),
+                (BIRD_X, int(bird_y), BIRD_SIZE, BIRD_SIZE),
             )
+
             pygame.display.flip()
 
-            if camera_frame is not None:
-                cv2.putText(
-                    camera_frame,
-                    "CONTROL WITH SQUAT",
-                    (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.1,
-                    (0, 255, 0),
-                    3,
-                )
+            if frame is not None:
+                cv2.imshow("Camera", frame)
 
-                if ratio is not None:
-                    cv2.putText(
-                        camera_frame,
-                        f"RATIO: {ratio:.2f}",
-                        (30, 95),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0,
-                        (0, 255, 255),
-                        3,
-                    )
-                else:
-                    cv2.putText(
-                        camera_frame,
-                        "NO POSE",
-                        (30, 95),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0,
-                        (0, 0, 255),
-                        3,
-                    )
-
-                cv2.imshow("Camera", camera_frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key in [27, ord("q")]:
+            if cv2.waitKey(1) & 0xFF in [27, ord("q")]:
                 running = False
+
     finally:
-        detector.release()
+        if detector is not None:
+            detector.release()
         pygame.quit()
         sys.exit()
 

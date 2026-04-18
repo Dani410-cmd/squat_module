@@ -3,7 +3,7 @@ import mediapipe as mp
 
 
 class SquatControlModule:
-    def __init__(self, camera_index=0, camera_backend=None):
+    def __init__(self):
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
@@ -13,49 +13,30 @@ class SquatControlModule:
             min_tracking_confidence=0.5,
         )
 
-        self.cap = self._open_camera(camera_index, camera_backend)
+        self.cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+        if not self.cap.isOpened():
+            raise RuntimeError("Не удалось открыть камеру")
 
-        if not self.cap or not self.cap.isOpened():
-            raise RuntimeError(
-                "Не удалось открыть камеру. Проверь доступ к камере и camera_index."
-            )
+        self.standing_value = None
+        self.squat_value = None
 
-        self.standing_hip_y = None
-        self.squat_hip_y = None
+    def _avg_y(self, landmarks, left_landmark, right_landmark):
+        left_point = landmarks[left_landmark.value]
+        right_point = landmarks[right_landmark.value]
+        return (left_point.y + right_point.y) / 2.0
 
-    def _open_camera(self, camera_index, camera_backend):
-        backends = []
+    def _clamp01(self, value):
+        return max(0.0, min(1.0, value))
 
-        if camera_backend is not None:
-            backends.append(camera_backend)
-
-        if hasattr(cv2, "CAP_AVFOUNDATION"):
-            backends.append(cv2.CAP_AVFOUNDATION)
-        if hasattr(cv2, "CAP_DSHOW"):
-            backends.append(cv2.CAP_DSHOW)
-        if hasattr(cv2, "CAP_MSMF"):
-            backends.append(cv2.CAP_MSMF)
-
-        backends.append(None)
-
-        for backend in backends:
-            cap = cv2.VideoCapture(camera_index) if backend is None else cv2.VideoCapture(camera_index, backend)
-            if cap is not None and cap.isOpened():
-                return cap
-
-            if cap is not None:
-                cap.release()
-
-        return None
-
-    def get_current_hip_y(self, landmarks):
-        left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP.value]
-        right_hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
-        return (left_hip.y + right_hip.y) / 2
+    def get_hip_y(self, landmarks):
+        return self._avg_y(
+            landmarks,
+            self.mp_pose.PoseLandmark.LEFT_HIP,
+            self.mp_pose.PoseLandmark.RIGHT_HIP,
+        )
 
     def read_frame(self):
         ret, frame = self.cap.read()
-
         if not ret:
             return None, None, None
 
@@ -67,47 +48,114 @@ class SquatControlModule:
             return frame, None, None
 
         landmarks = results.pose_landmarks.landmark
-        hip_y = self.get_current_hip_y(landmarks)
+        current_value = self.get_hip_y(landmarks)
 
-        return frame, results, hip_y
+        return frame, results, current_value
+
+    def calibrate_standing(self, samples=30):
+        values = []
+
+        while len(values) < samples:
+            frame, _, current_value = self.read_frame()
+            if frame is None:
+                continue
+
+            if current_value is not None:
+                values.append(current_value)
+
+            cv2.putText(
+                frame,
+                "CALIBRATION: STAND STILL",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+            )
+
+            cv2.putText(
+                frame,
+                f"Samples: {len(values)}/{samples}",
+                (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 0),
+                2,
+            )
+
+            cv2.imshow("Camera", frame)
+
+            if cv2.waitKey(1) & 0xFF in [27, ord("q")]:
+                return False
+
+        self.standing_value = min(values)
+        return True
+
+    def calibrate_squat(self, samples=30):
+        values = []
+
+        while len(values) < samples:
+            frame, _, current_value = self.read_frame()
+            if frame is None:
+                continue
+
+            if current_value is not None:
+                values.append(current_value)
+
+            cv2.putText(
+                frame,
+                "CALIBRATION: GO TO LOWEST SQUAT",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+            )
+
+            cv2.putText(
+                frame,
+                f"Samples: {len(values)}/{samples}",
+                (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 0),
+                2,
+            )
+
+            cv2.imshow("Camera", frame)
+
+            if cv2.waitKey(1) & 0xFF in [27, ord("q")]:
+                return False
+
+        self.squat_value = max(values)
+        return True
 
     def is_calibrated(self):
         return (
-            self.standing_hip_y is not None
-            and self.squat_hip_y is not None
-            and self.squat_hip_y > self.standing_hip_y
+            self.standing_value is not None
+            and self.squat_value is not None
+            and abs(self.squat_value - self.standing_value) > 1e-6
         )
 
     def get_ratio(self):
-        frame, results, hip_y = self.read_frame()
+        frame, _, current_value = self.read_frame()
 
         if frame is None:
             return None, None
 
-        if not self.is_calibrated() or hip_y is None:
+        if not self.is_calibrated() or current_value is None:
             return frame, None
 
-        denominator = self.squat_hip_y - self.standing_hip_y
-        if denominator <= 0:
+        denominator = self.squat_value - self.standing_value
+        if abs(denominator) < 1e-6:
             return frame, None
 
-        ratio = (hip_y - self.standing_hip_y) / denominator
-        ratio = max(0.0, min(1.0, ratio))
-
-        cv2.putText(
-            frame,
-            f"Ratio: {ratio:.2f}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2,
-        )
+        ratio = (current_value - self.standing_value) / denominator
+        ratio = self._clamp01(ratio)
 
         return frame, ratio
 
     def release(self):
-        if self.cap is not None:
-            self.cap.release()
+        self.cap.release()
         self.pose.close()
         cv2.destroyAllWindows()
